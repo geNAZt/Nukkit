@@ -1,9 +1,6 @@
 package cn.nukkit;
 
-import cn.nukkit.block.Block;
-import cn.nukkit.block.BlockAir;
-import cn.nukkit.block.BlockDoor;
-import cn.nukkit.block.BlockEnderChest;
+import cn.nukkit.block.*;
 import cn.nukkit.blockentity.BlockEntity;
 import cn.nukkit.blockentity.BlockEntityItemFrame;
 import cn.nukkit.blockentity.BlockEntitySign;
@@ -62,6 +59,7 @@ import cn.nukkit.permission.PermissionAttachmentInfo;
 import cn.nukkit.plugin.Plugin;
 import cn.nukkit.potion.Effect;
 import cn.nukkit.potion.Potion;
+import cn.nukkit.resourcepacks.ResourcePack;
 import cn.nukkit.utils.Binary;
 import cn.nukkit.utils.TextFormat;
 import cn.nukkit.utils.Zlib;
@@ -1675,29 +1673,6 @@ public class Player extends EntityHuman implements CommandSender, InventoryHolde
         return (dot1 - dot) >= -maxDiff;
     }
 
-    public void onPlayerPreLogin() {
-        //TODO: AUTHENTICATE
-        this.tryAuthenticate();
-    }
-
-    public void tryAuthenticate() {
-        PlayStatusPacket pk = new PlayStatusPacket();
-        pk.status = PlayStatusPacket.LOGIN_SUCCESS;
-        this.dataPacket(pk);
-        this.authenticateCallback(true);
-    }
-
-    public void authenticateCallback(boolean valid) {
-        //TODO add more stuff after authentication is available
-
-        if (!valid) {
-            this.close("", "disconnectionScreen.invalidSession");
-            return;
-        }
-
-        this.processLogin();
-    }
-
     protected void processLogin() {
         if (!this.server.isWhitelisted((this.getName()).toLowerCase())) {
             this.kick(PlayerKickEvent.Reason.NOT_WHITELISTED, "Server is white-listed");
@@ -1826,12 +1801,6 @@ public class Player extends EntityHuman implements CommandSender, InventoryHolde
         }
 
         if (this.isSpectator()) this.keepMovement = true;
-
-        PlayStatusPacket statusPacket = new PlayStatusPacket();
-        statusPacket.status = PlayStatusPacket.LOGIN_SUCCESS;
-        this.dataPacket(statusPacket);
-
-        this.dataPacket(new ResourcePacksInfoPacket());
 
         if (this.spawnPosition == null && this.namedTag.contains("SpawnLevel") && (level = this.server.getLevelByName(this.namedTag.getString("SpawnLevel"))) != null) {
             this.spawnPosition = new Position(this.namedTag.getInt("SpawnX"), this.namedTag.getInt("SpawnY"), this.namedTag.getInt("SpawnZ"), level);
@@ -2010,8 +1979,64 @@ public class Player extends EntityHuman implements CommandSender, InventoryHolde
                         break;
                     }
 
-                    this.onPlayerPreLogin();
+                    PlayStatusPacket statusPacket = new PlayStatusPacket();
+                    statusPacket.status = PlayStatusPacket.LOGIN_SUCCESS;
+                    this.dataPacket(statusPacket);
 
+                    ResourcePacksInfoPacket infoPacket = new ResourcePacksInfoPacket();
+                    infoPacket.resourcePackEntries = this.server.getResourcePackManager().getResourceStack();
+                    infoPacket.mustAccept = this.server.getForceResources();
+                    this.dataPacket(infoPacket);
+
+                    break;
+                case ProtocolInfo.RESOURCE_PACK_CLIENT_RESPONSE_PACKET:
+                    ResourcePackClientResponsePacket responsePacket = (ResourcePackClientResponsePacket) packet;
+                    switch (responsePacket.responseStatus) {
+                        case ResourcePackClientResponsePacket.STATUS_REFUSED:
+                            this.close("", "disconnectionScreen.noReason");
+                            break;
+                        case ResourcePackClientResponsePacket.STATUS_SEND_PACKS:
+                            for (String id : responsePacket.packIds) {
+                                ResourcePack resourcePack = this.server.getResourcePackManager().getPackById(id);
+                                if (resourcePack == null) {
+                                    this.close("", "disconnectionScreen.resourcePack");
+                                    break;
+                                }
+
+                                ResourcePackDataInfoPacket dataInfoPacket = new ResourcePackDataInfoPacket();
+                                dataInfoPacket.packId = resourcePack.getPackId();
+                                dataInfoPacket.maxChunkSize = 1048576; //megabyte
+                                dataInfoPacket.chunkCount = resourcePack.getPackSize() / dataInfoPacket.maxChunkSize;
+                                dataInfoPacket.compressedPackSize = resourcePack.getPackSize();
+                                dataInfoPacket.sha256 = resourcePack.getSha256();
+                                this.dataPacket(dataInfoPacket);
+                            }
+                            break;
+                        case ResourcePackClientResponsePacket.STATUS_HAVE_ALL_PACKS:
+                            ResourcePackStackPacket stackPacket = new ResourcePackStackPacket();
+                            stackPacket.mustAccept = this.server.getForceResources();
+                            stackPacket.resourcePackStack = this.server.getResourcePackManager().getResourceStack();
+                            this.dataPacket(stackPacket);
+                            break;
+                        case ResourcePackClientResponsePacket.STATUS_COMPLETED:
+                            this.processLogin();
+                            break;
+                    }
+                    break;
+                case ProtocolInfo.RESOURCE_PACK_CHUNK_REQUEST_PACKET:
+                    ResourcePackChunkRequestPacket requestPacket = (ResourcePackChunkRequestPacket) packet;
+                    ResourcePack resourcePack = this.server.getResourcePackManager().getPackById(requestPacket.packId);
+                    if (resourcePack == null) {
+                        this.close("", "disconnectionScreen.resourcePack");
+                        break;
+                    }
+
+                    ResourcePackChunkDataPacket dataPacket = new ResourcePackChunkDataPacket();
+                    dataPacket.packId = resourcePack.getPackId();
+                    dataPacket.chunkIndex = requestPacket.chunkIndex;
+                    dataPacket.data = resourcePack.getPackChunk(1048576 * requestPacket.chunkIndex, 1048576);
+                    dataPacket.progress = 1048576 * requestPacket.chunkIndex;
+                    this.dataPacket(dataPacket);
                     break;
                 case ProtocolInfo.MOVE_PLAYER_PACKET:
                     if (this.teleportPosition != null) {
@@ -2417,6 +2442,10 @@ public class Player extends EntityHuman implements CommandSender, InventoryHolde
                             this.getServer().getPluginManager().callEvent(playerInteractEvent);
                             if (playerInteractEvent.isCancelled()) {
                                 this.inventory.sendHeldItem(this);
+                                break;
+                            }
+                            if (target.getId() == Block.NOTEBLOCK) {
+                                ((BlockNoteblock)target).emitSound();
                                 break;
                             }
                             Block block = target.getSide(((PlayerActionPacket) packet).face);
